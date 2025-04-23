@@ -4,6 +4,8 @@ go 1.23.7
 
 require github.com/kaspanet/kaspad v0.12.20
 
+replace github.com/kaspanet/kaspad => ../kaspad
+
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/jrick/logrotate v1.0.0 // indirect
