@@ -12,6 +12,7 @@ import (
 	"github.com/kaspanet/kaspad/domain/consensus/model/externalapi"
 	"github.com/kaspanet/kaspad/domain/dagconfig"
 	"github.com/kaspanet/kaspad/infrastructure/network/rpcclient"
+	"github.com/kaspanet/kaspad/util/txmass"
 )
 
 type walletUTXO struct {
@@ -31,15 +32,13 @@ type balancesMapType map[*walletAddress]*balancesType
 
 func main() {
 
-	address := "kaspatest:qp96y8xa6gqlh3a5c6wu9x73a5egvsw2vk7w7nzm8x98wvkavjlg29zvta4m6"
-
 	rpcClient, err := connectToRPC("localhost:16210", 30)
 	if err != nil {
 		log.Fatal(fmt.Sprintf("error connecting to the RPC server: %s", err))
 		return
 	}
 
-	defer rpcClient.Disconnect()
+	//defer rpcClient.Disconnect()
 
 	keysFile, err := keys.ReadKeysFile(&dagconfig.Params{}, keysPath)
 	if err != nil {
@@ -48,12 +47,21 @@ func main() {
 	}
 
 	kaspaClient := &Client{
-		rpcClient:        rpcClient,
-		coinbaseMaturity: 100,
-		keysFile:         keysFile,
+		rpcClient:          rpcClient,
+		coinbaseMaturity:   100,
+		keysFile:           keysFile,
+		params:             &dagconfig.TestnetParams,
+		nextSyncStartIndex: 0,
+		addressSet:         make(walletAddressSet),
+		txMassCalculator:   txmass.NewCalculator(1, 10, 1000),
+		usedOutpoints:      map[externalapi.DomainOutpoint]time.Time{},
 	}
 
-	kaspaClient.Send(address, "1")
+	err = kaspaClient.Send(address, "1")
+	if err != nil {
+		log.Fatal("Error sending %s", err)
+
+	}
 
 }
 

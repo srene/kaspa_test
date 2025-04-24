@@ -1,9 +1,12 @@
 package main
 
 import (
+	"math"
+
 	"github.com/kaspanet/go-secp256k1"
 	"github.com/pkg/errors"
 
+	"github.com/kaspanet/kaspad/cmd/kaspawallet/daemon/pb"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet/serialization"
 	"github.com/kaspanet/kaspad/domain/consensus/model/externalapi"
@@ -362,4 +365,140 @@ func (s *Client) isUTXOSpendable(entry *walletUTXO, virtualDAAScore uint64) bool
 		return true
 	}
 	return entry.UTXOEntry.BlockDAAScore()+s.coinbaseMaturity < virtualDAAScore
+}
+
+func (s *Client) calculateFeeLimits(requestFeePolicy *pb.FeePolicy) (feeRate float64, maxFee uint64, err error) {
+	feeRate = minFeeRate
+	maxFee = math.MaxUint64
+
+	if requestFeePolicy == nil {
+		requestFeePolicy = &pb.FeePolicy{}
+	}
+
+	switch requestFeePolicy := requestFeePolicy.FeePolicy.(type) {
+	case *pb.FeePolicy_ExactFeeRate:
+		feeRate = requestFeePolicy.ExactFeeRate
+		if feeRate < minFeeRate {
+			return 0, 0, errors.Errorf("requested fee rate %f is too low, minimum fee rate is %f", feeRate, minFeeRate)
+		}
+	case *pb.FeePolicy_MaxFeeRate:
+		estimate, err := s.rpcClient.GetFeeEstimate()
+		if err != nil {
+			return 0, 0, err
+		}
+		if requestFeePolicy.MaxFeeRate < minFeeRate {
+			return 0, 0, errors.Errorf("requested max fee rate %f is too low, minimum fee rate is %f", requestFeePolicy.MaxFeeRate, minFeeRate)
+		}
+		feeRate = math.Min(estimate.Estimate.NormalBuckets[0].Feerate, requestFeePolicy.MaxFeeRate)
+	case *pb.FeePolicy_MaxFee:
+		estimate, err := s.rpcClient.GetFeeEstimate()
+		if err != nil {
+			return 0, 0, err
+		}
+		feeRate = estimate.Estimate.NormalBuckets[0].Feerate
+		maxFee = requestFeePolicy.MaxFee
+	case nil:
+		estimate, err := s.rpcClient.GetFeeEstimate()
+		if err != nil {
+			return 0, 0, err
+		}
+		feeRate = estimate.Estimate.NormalBuckets[0].Feerate
+		// Default to a bound of max 1 KAS as fee
+		maxFee = constants.SompiPerKaspa
+	}
+
+	return feeRate, maxFee, nil
+}
+
+func (s *Client) estimateFee(selectedUTXOs []*libkaspawallet.UTXO, feeRate float64, maxFee uint64, recipientValue uint64) (uint64, error) {
+	fakePubKey := [util.PublicKeySizeECDSA]byte{}
+	fakeAddr, err := util.NewAddressPublicKeyECDSA(fakePubKey[:], s.params.Prefix) // We assume the worst case where the recipient address is ECDSA. In this case the scriptPubKey will be the longest.
+	if err != nil {
+		return 0, err
+	}
+
+	totalValue := uint64(0)
+	for _, utxo := range selectedUTXOs {
+		totalValue += utxo.UTXOEntry.Amount()
+	}
+
+	// This is an approximation for the distribution of value between the recipient output and the change output.
+	var mockPayments []*libkaspawallet.Payment
+	if totalValue > recipientValue {
+		mockPayments = []*libkaspawallet.Payment{
+			{
+				Address: fakeAddr,
+				Amount:  recipientValue,
+			},
+			{
+				Address: fakeAddr,
+				Amount:  totalValue - recipientValue, // We ignore the fee since we expect it to be insignificant in mass calculation.
+			},
+		}
+	} else {
+		mockPayments = []*libkaspawallet.Payment{
+			{
+				Address: fakeAddr,
+				Amount:  totalValue,
+			},
+		}
+	}
+
+	mockTx, err := libkaspawallet.CreateUnsignedTransaction(s.keysFile.ExtendedPublicKeys,
+		s.keysFile.MinimumSignatures,
+		mockPayments, selectedUTXOs)
+	if err != nil {
+		return 0, err
+	}
+
+	mass, err := s.estimateMassAfterSignatures(mockTx)
+	if err != nil {
+		return 0, err
+	}
+
+	return min(uint64(math.Ceil(float64(mass)*feeRate)), maxFee), nil
+}
+
+func (s *Client) estimateFeePerInput(feeRate float64) (uint64, error) {
+	mockUTXO := &libkaspawallet.UTXO{
+		Outpoint: &externalapi.DomainOutpoint{
+			TransactionID: externalapi.DomainTransactionID{},
+			Index:         0,
+		},
+		UTXOEntry: utxo.NewUTXOEntry(1, &externalapi.ScriptPublicKey{
+			Script:  nil,
+			Version: 0,
+		}, false, 0),
+		DerivationPath: "m",
+	}
+
+	mockTx, err := libkaspawallet.CreateUnsignedTransaction(s.keysFile.ExtendedPublicKeys,
+		s.keysFile.MinimumSignatures,
+		nil, []*libkaspawallet.UTXO{mockUTXO})
+	if err != nil {
+		return 0, err
+	}
+
+	// Here we use compute mass to avoid dividing by zero. This is ok since `s.estimateFeePerInput` is only used
+	// in the case of compound transactions that have a compute mass higher than its storage mass.
+	mass, err := s.estimateComputeMassAfterSignatures(mockTx)
+	if err != nil {
+		return 0, err
+	}
+
+	mockTxWithoutUTXO, err := libkaspawallet.CreateUnsignedTransaction(s.keysFile.ExtendedPublicKeys,
+		s.keysFile.MinimumSignatures,
+		nil, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	massWithoutUTXO, err := s.estimateComputeMassAfterSignatures(mockTxWithoutUTXO)
+	if err != nil {
+		return 0, err
+	}
+
+	inputMass := mass - massWithoutUTXO
+
+	return uint64(float64(inputMass) * feeRate), nil
 }

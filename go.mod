@@ -2,14 +2,17 @@ module github.com/srene/kaspa_test
 
 go 1.23.7
 
-require github.com/kaspanet/kaspad v0.12.20
+require (
+	github.com/kaspanet/go-secp256k1 v0.0.7
+	github.com/kaspanet/kaspad v0.12.20
+)
 
 replace github.com/kaspanet/kaspad => ../kaspad
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/jrick/logrotate v1.0.0 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pkg/errors v0.9.1
 	golang.org/x/crypto v0.32.0 // indirect
 	google.golang.org/grpc v1.71.1 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
@@ -19,7 +22,6 @@ require (
 	github.com/btcsuite/btcutil v1.0.2 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/kaspanet/go-muhash v0.0.4 // indirect
-	github.com/kaspanet/go-secp256k1 v0.0.7 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/tyler-smith/go-bip39 v1.1.0 // indirect

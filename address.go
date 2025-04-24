@@ -3,9 +3,13 @@ package main
 import (
 	"fmt"
 
+	"github.com/kaspanet/kaspad/app/appmessage"
 	"github.com/kaspanet/kaspad/cmd/kaspawallet/libkaspawallet"
 	"github.com/kaspanet/kaspad/util"
+	"github.com/pkg/errors"
 )
+
+var keyChains = []uint8{libkaspawallet.ExternalKeychain, libkaspawallet.InternalKeychain}
 
 func (s *Client) changeAddress(useExisting bool, fromAddresses []*walletAddress) (util.Address, *walletAddress, error) {
 	var walletAddr *walletAddress
@@ -119,4 +123,109 @@ func (s *Client) walletAddressPath(wAddr *walletAddress) string {
 
 func (s *Client) isMultisig() bool {
 	return len(s.keysFile.ExtendedPublicKeys) > 1
+}
+
+// collectFarAddresses collects numIndexesToQueryForFarAddresses addresses
+// from the last point it stopped in the previous call.
+func (s *Client) collectFarAddresses() error {
+
+	err := s.collectAddresses(s.nextSyncStartIndex, s.nextSyncStartIndex+numIndexesToQueryForFarAddresses)
+	if err != nil {
+		return err
+	}
+
+	s.nextSyncStartIndex += numIndexesToQueryForFarAddresses
+	return nil
+}
+
+func (s *Client) collectAddresses(start, end uint32) error {
+	addressSet, err := s.addressesToQuery(start, end)
+	if err != nil {
+		return err
+	}
+
+	getBalancesByAddressesResponse, err := s.rpcClient.GetBalancesByAddresses(addressSet.strings())
+	if err != nil {
+		return err
+	}
+
+	err = s.updateAddressesAndLastUsedIndexes(addressSet, getBalancesByAddressesResponse)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// addressesToQuery scans the addresses in the given range. Because
+// each cosigner in a multisig has its own unique path for generating
+// addresses it goes over all the cosigners and add their addresses
+// for each key chain.
+func (s *Client) addressesToQuery(start, end uint32) (walletAddressSet, error) {
+	addresses := make(walletAddressSet)
+	for index := start; index < end; index++ {
+		for cosignerIndex := uint32(0); cosignerIndex < uint32(len(s.keysFile.ExtendedPublicKeys)); cosignerIndex++ {
+			for _, keychain := range keyChains {
+				address := &walletAddress{
+					index:         index,
+					cosignerIndex: cosignerIndex,
+					keyChain:      keychain,
+				}
+				addressString, err := s.walletAddressString(address)
+				if err != nil {
+					return nil, err
+				}
+				addresses[addressString] = address
+			}
+		}
+	}
+
+	return addresses, nil
+}
+
+func (s *Client) updateAddressesAndLastUsedIndexes(requestedAddressSet walletAddressSet,
+	getBalancesByAddressesResponse *appmessage.GetBalancesByAddressesResponseMessage) error {
+	lastUsedExternalIndex := s.keysFile.LastUsedExternalIndex()
+	lastUsedInternalIndex := s.keysFile.LastUsedInternalIndex()
+
+	for _, entry := range getBalancesByAddressesResponse.Entries {
+		walletAddress, ok := requestedAddressSet[entry.Address]
+		if !ok {
+			return errors.Errorf("Got result from address %s even though it wasn't requested", entry.Address)
+		}
+
+		if entry.Balance == 0 {
+			continue
+		}
+
+		s.addressSet[entry.Address] = walletAddress
+
+		if walletAddress.keyChain == libkaspawallet.ExternalKeychain {
+			if walletAddress.index > lastUsedExternalIndex {
+				lastUsedExternalIndex = walletAddress.index
+			}
+			continue
+		}
+
+		if walletAddress.index > lastUsedInternalIndex {
+			lastUsedInternalIndex = walletAddress.index
+		}
+	}
+
+	err := s.keysFile.SetLastUsedExternalIndex(lastUsedExternalIndex)
+	if err != nil {
+		return err
+	}
+
+	return s.keysFile.SetLastUsedInternalIndex(lastUsedInternalIndex)
+}
+
+func walletAddressesContain(addresses []*walletAddress, contain *walletAddress) bool {
+	for _, address := range addresses {
+		if *address == *contain {
+			return true
+		}
+	}
+
+	return false
 }
